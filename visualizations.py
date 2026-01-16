@@ -4,7 +4,7 @@ Visualization functions for promotion analysis charts using Plotly.
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-from calculations import PromotionResults
+from calculations import PromotionResults, HistoricalResults, get_grade_color
 
 
 def create_breakeven_chart(results: PromotionResults) -> go.Figure:
@@ -300,6 +300,267 @@ def create_margin_erosion_chart(results_list: list[PromotionResults]) -> go.Figu
         title="Margin Erosion by Product",
         xaxis_title="Product",
         yaxis_title="Margin Erosion (%)",
+        template="plotly_white",
+        showlegend=False
+    )
+
+    return fig
+
+
+# ============================================================================
+# Historical Grading Visualizations
+# ============================================================================
+
+def create_weekly_scorecard(results: HistoricalResults) -> go.Figure:
+    """
+    Create a horizontal bar chart showing each week's performance vs breakeven.
+
+    Args:
+        results: HistoricalResults from analysis
+
+    Returns:
+        Plotly Figure with weekly performance bars
+    """
+    weeks = [f"Week {g.week_number}" for g in results.weekly_grades]
+    actual_lifts = [g.actual_lift_pct * 100 for g in results.weekly_grades]
+    scores = [g.grade_score for g in results.weekly_grades]
+
+    fig = go.Figure()
+
+    # Actual lift bars - single color
+    fig.add_trace(go.Bar(
+        y=weeks,
+        x=actual_lifts,
+        orientation='h',
+        marker_color='#2E86AB',
+        text=[f"{l:.1f}% (Score: {s:.0f})" for l, s in zip(actual_lifts, scores)],
+        textposition='outside',
+        name='Actual Lift'
+    ))
+
+    # Breakeven threshold line
+    breakeven_lift = results.breakeven_lift_pct * 100 if results.breakeven_lift_pct != float('inf') else 0
+    fig.add_vline(
+        x=breakeven_lift,
+        line_dash="dash",
+        line_color="#333333",
+        line_width=2,
+        annotation_text=f"Breakeven: {breakeven_lift:.0f}%"
+    )
+
+    fig.update_layout(
+        title="Weekly Performance Scorecard",
+        xaxis_title="Sales Lift (%)",
+        yaxis_title="",
+        template="plotly_white",
+        showlegend=False,
+        height=max(300, len(weeks) * 60)
+    )
+
+    return fig
+
+
+def create_cumulative_chart(results: HistoricalResults) -> go.Figure:
+    """
+    Create a line chart showing cumulative units over weeks.
+
+    Args:
+        results: HistoricalResults from analysis
+
+    Returns:
+        Plotly Figure with baseline, actual, and breakeven lines
+    """
+    week_labels = [f"Week {g.week_number}" for g in results.weekly_grades]
+
+    # Calculate cumulative values
+    cum_baseline = []
+    cum_actual = []
+    cum_breakeven = []
+
+    running_baseline = 0
+    running_actual = 0
+    running_breakeven = 0
+
+    breakeven_multiplier = (1 + results.breakeven_lift_pct) if results.breakeven_lift_pct != float('inf') else 1
+
+    for g in results.weekly_grades:
+        running_baseline += g.baseline_units
+        running_actual += g.actual_units
+        running_breakeven += g.baseline_units * breakeven_multiplier
+
+        cum_baseline.append(running_baseline)
+        cum_actual.append(running_actual)
+        cum_breakeven.append(running_breakeven)
+
+    fig = go.Figure()
+
+    # Baseline line
+    fig.add_trace(go.Scatter(
+        x=week_labels,
+        y=cum_baseline,
+        mode='lines+markers',
+        name='Baseline (Standard)',
+        line=dict(color='#2E86AB', width=2, dash='dot'),
+        marker=dict(size=8)
+    ))
+
+    # Breakeven threshold line
+    fig.add_trace(go.Scatter(
+        x=week_labels,
+        y=cum_breakeven,
+        mode='lines+markers',
+        name='Breakeven Target',
+        line=dict(color='#F18F01', width=2, dash='dash'),
+        marker=dict(size=8)
+    ))
+
+    # Actual line
+    fig.add_trace(go.Scatter(
+        x=week_labels,
+        y=cum_actual,
+        mode='lines+markers',
+        name='Actual',
+        line=dict(color='#4CAF50' if results.overall_passed else '#E94F37', width=3),
+        marker=dict(size=10)
+    ))
+
+    fig.update_layout(
+        title="Cumulative Units Over Time",
+        xaxis_title="Week",
+        yaxis_title="Cumulative Units",
+        template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        hovermode="x unified"
+    )
+
+    return fig
+
+
+def create_profit_waterfall(results: HistoricalResults) -> go.Figure:
+    """
+    Create a waterfall chart showing profit contribution by week.
+
+    Args:
+        results: HistoricalResults from analysis
+
+    Returns:
+        Plotly Figure
+    """
+    weeks = [f"Week {g.week_number}" for g in results.weekly_grades]
+    profits = [g.profit_vs_baseline for g in results.weekly_grades]
+
+    # Determine colors based on positive/negative
+    colors = ['#4CAF50' if p >= 0 else '#E94F37' for p in profits]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Waterfall(
+        x=weeks + ['Total'],
+        y=profits + [sum(profits)],
+        measure=['relative'] * len(profits) + ['total'],
+        text=[f"${p:+,.0f}" for p in profits] + [f"${sum(profits):+,.0f}"],
+        textposition='outside',
+        connector=dict(line=dict(color='#888888')),
+        increasing=dict(marker=dict(color='#4CAF50')),
+        decreasing=dict(marker=dict(color='#E94F37')),
+        totals=dict(marker=dict(color='#2E86AB'))
+    ))
+
+    fig.add_hline(y=0, line_dash="solid", line_color="black", line_width=1)
+
+    fig.update_layout(
+        title="Profit vs Baseline by Week",
+        xaxis_title="",
+        yaxis_title="Profit vs Baseline ($)",
+        template="plotly_white",
+        showlegend=False
+    )
+
+    return fig
+
+
+def create_overall_gauge(results: HistoricalResults) -> go.Figure:
+    """
+    Create a gauge chart showing overall grade score.
+
+    Args:
+        results: HistoricalResults from analysis
+
+    Returns:
+        Plotly Figure
+    """
+    score = results.overall_grade_score
+
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=score,
+        domain={'x': [0, 1], 'y': [0, 1]},
+        title={'text': "Overall Score", 'font': {'size': 24}},
+        number={'suffix': '%', 'font': {'size': 48}},
+        gauge={
+            'axis': {'range': [0, 100], 'tickwidth': 1},
+            'bar': {'color': get_grade_color(score)},
+            'bgcolor': 'white',
+            'borderwidth': 2,
+            'bordercolor': 'gray',
+            'steps': [
+                {'range': [0, 50], 'color': '#ffebee'},
+                {'range': [50, 75], 'color': '#fff3e0'},
+                {'range': [75, 100], 'color': '#e8f5e9'}
+            ],
+            'threshold': {
+                'line': {'color': '#333333', 'width': 4},
+                'thickness': 0.75,
+                'value': 100
+            }
+        }
+    ))
+
+    fig.update_layout(
+        height=300,
+        margin=dict(l=20, r=20, t=50, b=20)
+    )
+
+    return fig
+
+
+def create_historical_batch_comparison(results_list: list) -> go.Figure:
+    """
+    Create a comparison chart for multiple historical promotions.
+
+    Args:
+        results_list: List of HistoricalResults
+
+    Returns:
+        Plotly Figure
+    """
+    products = [r.product_name for r in results_list]
+    scores = [r.overall_grade_score for r in results_list]
+    colors = [get_grade_color(s) for s in scores]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=products,
+        y=scores,
+        marker_color=colors,
+        text=[f"{s:.0f}%" for s in scores],
+        textposition='outside'
+    ))
+
+    # Add pass/fail threshold
+    fig.add_hline(
+        y=100,
+        line_dash="dash",
+        line_color="#333333",
+        annotation_text="Pass Threshold (100%)"
+    )
+
+    fig.update_layout(
+        title="Overall Grade by Product",
+        xaxis_title="Product",
+        yaxis_title="Grade Score (%)",
+        yaxis_range=[0, max(scores) * 1.15 if scores else 100],
         template="plotly_white",
         showlegend=False
     )

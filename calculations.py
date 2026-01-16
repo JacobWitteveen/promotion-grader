@@ -15,8 +15,68 @@ class PromotionInputs:
     cogs: float
     logistics_cost: float = 0.0
     other_variable_costs: float = 0.0
-    promo_terms: str = ""
+    promo_cost_per_unit: float = 0.0  # Additional per-unit cost during promotion (e.g., retailer subsidies)
     baseline_units: float = 100.0
+
+
+@dataclass
+class WeeklyData:
+    """Weekly baseline and actual units data."""
+    week_number: int
+    baseline_units: float
+    actual_units: float
+
+
+@dataclass
+class HistoricalInputs:
+    """Input data for historical promotion grading."""
+    product_name: str
+    standard_price: float
+    promo_price: float
+    cogs: float
+    logistics_cost: float = 0.0
+    other_variable_costs: float = 0.0
+    promo_cost_per_unit: float = 0.0  # Additional per-unit cost during promotion (e.g., retailer subsidies)
+    weekly_data: list = None  # list[WeeklyData]
+
+
+@dataclass
+class WeeklyGrade:
+    """Grading results for a single week."""
+    week_number: int
+    baseline_units: float
+    actual_units: float
+    actual_lift_pct: float
+    breakeven_lift_pct: float
+    lift_vs_breakeven: float  # positive = exceeded, negative = fell short
+    actual_profit: float
+    baseline_profit: float
+    profit_vs_baseline: float
+    grade_score: float  # 0-100 scale
+    passed: bool
+
+
+@dataclass
+class HistoricalResults:
+    """Full results from historical promotion grading."""
+    # Promo details
+    product_name: str
+    standard_margin: float
+    promo_margin: float
+    breakeven_lift_pct: float
+
+    # Weekly breakdown
+    weekly_grades: list  # list[WeeklyGrade]
+
+    # Cumulative totals
+    total_baseline_units: float
+    total_actual_units: float
+    total_baseline_profit: float
+    total_actual_profit: float
+    overall_lift_pct: float
+    overall_profit_vs_baseline: float
+    overall_grade_score: float
+    overall_passed: bool
 
 
 @dataclass
@@ -132,7 +192,8 @@ def generate_scenario_analysis(inputs: PromotionInputs) -> dict:
         Dictionary with lift percentages as keys and profit values
     """
     total_costs = inputs.cogs + inputs.logistics_cost + inputs.other_variable_costs
-    promo_margin = inputs.promo_price - total_costs
+    promo_total_costs = total_costs + inputs.promo_cost_per_unit
+    promo_margin = inputs.promo_price - promo_total_costs
     standard_margin = inputs.standard_price - total_costs
     baseline_profit = inputs.baseline_units * standard_margin
 
@@ -166,8 +227,10 @@ def analyze_promotion(inputs: PromotionInputs) -> PromotionResults:
     total_costs = inputs.cogs + inputs.logistics_cost + inputs.other_variable_costs
     standard_margin = calculate_margin(inputs.standard_price, inputs.cogs,
                                        inputs.logistics_cost, inputs.other_variable_costs)
+    # Promo margin includes additional promo-specific costs (e.g., retailer subsidies)
     promo_margin = calculate_margin(inputs.promo_price, inputs.cogs,
-                                    inputs.logistics_cost, inputs.other_variable_costs)
+                                    inputs.logistics_cost,
+                                    inputs.other_variable_costs + inputs.promo_cost_per_unit)
 
     margin_erosion = calculate_margin_erosion(standard_margin, promo_margin)
     breakeven_lift = calculate_breakeven_lift(standard_margin, promo_margin)
@@ -226,7 +289,7 @@ def analyze_batch(df: pd.DataFrame) -> list[PromotionResults]:
             cogs=float(row['cogs']),
             logistics_cost=float(row.get('logistics_cost', 0)),
             other_variable_costs=float(row.get('other_variable_costs', 0)),
-            promo_terms=str(row.get('promo_terms', '')),
+            promo_cost_per_unit=float(row.get('promo_cost_per_unit', 0)),
             baseline_units=float(row.get('baseline_units', 100))
         )
         results.append(analyze_promotion(inputs))
@@ -257,6 +320,180 @@ def results_to_dataframe(results: list[PromotionResults]) -> pd.DataFrame:
             'Baseline Units': r.baseline_units,
             'Breakeven Units': r.breakeven_units if r.breakeven_units != float('inf') else None,
             'Baseline Profit': r.baseline_profit
+        })
+
+    return pd.DataFrame(data)
+
+
+# ============================================================================
+# Historical Promotion Grading Functions
+# ============================================================================
+
+def calculate_grade_score(actual_lift: float, breakeven_lift: float) -> float:
+    """
+    Calculate 0-100 score based on how actual lift compares to breakeven.
+
+    Args:
+        actual_lift: Actual lift achieved as decimal (e.g., 0.5 = 50%)
+        breakeven_lift: Required breakeven lift as decimal
+
+    Returns:
+        Score from 0-100 (capped at 100)
+    """
+    if breakeven_lift <= 0:
+        return 100.0 if actual_lift >= 0 else 0.0
+
+    score = (actual_lift / breakeven_lift) * 100
+    return min(100.0, max(0.0, score))
+
+
+def get_grade_color(score: float) -> str:
+    """
+    Get color based on grade score.
+
+    Args:
+        score: Grade score 0-100
+
+    Returns:
+        Color string for visualization
+    """
+    if score >= 100:
+        return '#2E86AB'  # Blue - exceeded
+    elif score >= 75:
+        return '#4CAF50'  # Green - good
+    elif score >= 50:
+        return '#F18F01'  # Orange - moderate
+    else:
+        return '#E94F37'  # Red - poor
+
+
+def calculate_weekly_grade(week: WeeklyData, standard_margin: float,
+                           promo_margin: float, breakeven_lift: float) -> WeeklyGrade:
+    """
+    Grade a single week's performance against breakeven.
+
+    Args:
+        week: WeeklyData with baseline and actual units
+        standard_margin: Per-unit margin at standard price
+        promo_margin: Per-unit margin at promo price
+        breakeven_lift: Required lift to breakeven as decimal
+
+    Returns:
+        WeeklyGrade with all calculated metrics
+    """
+    # Calculate actual lift
+    if week.baseline_units > 0:
+        actual_lift = (week.actual_units - week.baseline_units) / week.baseline_units
+    else:
+        actual_lift = 0.0
+
+    # Calculate profits
+    baseline_profit = week.baseline_units * standard_margin
+    actual_profit = week.actual_units * promo_margin
+
+    # Calculate grade
+    grade_score = calculate_grade_score(actual_lift, breakeven_lift)
+    passed = actual_lift >= breakeven_lift
+
+    return WeeklyGrade(
+        week_number=week.week_number,
+        baseline_units=week.baseline_units,
+        actual_units=week.actual_units,
+        actual_lift_pct=actual_lift,
+        breakeven_lift_pct=breakeven_lift,
+        lift_vs_breakeven=actual_lift - breakeven_lift,
+        actual_profit=actual_profit,
+        baseline_profit=baseline_profit,
+        profit_vs_baseline=actual_profit - baseline_profit,
+        grade_score=grade_score,
+        passed=passed
+    )
+
+
+def analyze_historical(inputs: HistoricalInputs) -> HistoricalResults:
+    """
+    Perform full historical promotion analysis with grading.
+
+    Args:
+        inputs: HistoricalInputs with promo details and weekly data
+
+    Returns:
+        HistoricalResults with weekly grades and cumulative totals
+    """
+    # Calculate margins
+    total_costs = inputs.cogs + inputs.logistics_cost + inputs.other_variable_costs
+    promo_total_costs = total_costs + inputs.promo_cost_per_unit
+    standard_margin = inputs.standard_price - total_costs
+    promo_margin = inputs.promo_price - promo_total_costs
+
+    # Calculate breakeven lift
+    if promo_margin > 0:
+        breakeven_lift = (standard_margin / promo_margin) - 1
+    else:
+        breakeven_lift = float('inf')
+
+    # Grade each week
+    weekly_grades = []
+    for week in inputs.weekly_data:
+        grade = calculate_weekly_grade(week, standard_margin, promo_margin, breakeven_lift)
+        weekly_grades.append(grade)
+
+    # Calculate cumulative totals
+    total_baseline_units = sum(w.baseline_units for w in inputs.weekly_data)
+    total_actual_units = sum(w.actual_units for w in inputs.weekly_data)
+    total_baseline_profit = sum(g.baseline_profit for g in weekly_grades)
+    total_actual_profit = sum(g.actual_profit for g in weekly_grades)
+
+    # Overall lift
+    if total_baseline_units > 0:
+        overall_lift = (total_actual_units - total_baseline_units) / total_baseline_units
+    else:
+        overall_lift = 0.0
+
+    # Overall grade
+    overall_grade_score = calculate_grade_score(overall_lift, breakeven_lift)
+    overall_passed = overall_lift >= breakeven_lift
+
+    return HistoricalResults(
+        product_name=inputs.product_name,
+        standard_margin=standard_margin,
+        promo_margin=promo_margin,
+        breakeven_lift_pct=breakeven_lift,
+        weekly_grades=weekly_grades,
+        total_baseline_units=total_baseline_units,
+        total_actual_units=total_actual_units,
+        total_baseline_profit=total_baseline_profit,
+        total_actual_profit=total_actual_profit,
+        overall_lift_pct=overall_lift,
+        overall_profit_vs_baseline=total_actual_profit - total_baseline_profit,
+        overall_grade_score=overall_grade_score,
+        overall_passed=overall_passed
+    )
+
+
+def historical_results_to_dataframe(results: HistoricalResults) -> pd.DataFrame:
+    """
+    Convert weekly grades to a DataFrame for display.
+
+    Args:
+        results: HistoricalResults
+
+    Returns:
+        DataFrame with weekly breakdown
+    """
+    data = []
+    for g in results.weekly_grades:
+        data.append({
+            'Week': g.week_number,
+            'Baseline Units': g.baseline_units,
+            'Actual Units': g.actual_units,
+            'Actual Lift %': g.actual_lift_pct * 100,
+            'Breakeven Lift %': g.breakeven_lift_pct * 100 if g.breakeven_lift_pct != float('inf') else None,
+            'Baseline Profit': g.baseline_profit,
+            'Actual Profit': g.actual_profit,
+            'Profit vs Baseline': g.profit_vs_baseline,
+            'Grade Score': g.grade_score,
+            'Status': 'Pass' if g.passed else 'Fail'
         })
 
     return pd.DataFrame(data)

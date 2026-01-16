@@ -138,7 +138,7 @@ def get_sample_template() -> pd.DataFrame:
         'cogs': [12.00, 20.00, 40.00],
         'logistics_cost': [2.00, 3.00, 5.00],
         'other_variable_costs': [1.00, 2.00, 3.00],
-        'promo_terms': ['20% off', '20% off', '20% off'],
+        'promo_cost_per_unit': [0.00, 5.00, 10.00],
         'baseline_units': [500, 300, 100]
     }
     return pd.DataFrame(data)
@@ -171,3 +171,134 @@ def dataframe_to_excel(df: pd.DataFrame) -> bytes:
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Results')
     return output.getvalue()
+
+
+# ============================================================================
+# Historical Data Handling Functions
+# ============================================================================
+
+HISTORICAL_REQUIRED_COLUMNS = ['product_name', 'standard_price', 'promo_price', 'cogs', 'week', 'baseline_volume', 'promo_volume']
+
+
+def get_historical_template() -> pd.DataFrame:
+    """
+    Generate a sample template for historical promotion grading.
+    Uses a relational format with one row per product-week combination.
+
+    Returns:
+        Sample DataFrame with relational structure
+    """
+    data = {
+        'product_name': ['Widget A', 'Widget A', 'Widget A', 'Widget B', 'Widget B', 'Widget B'],
+        'standard_price': [29.99, 29.99, 29.99, 49.99, 49.99, 49.99],
+        'promo_price': [24.99, 24.99, 24.99, 39.99, 39.99, 39.99],
+        'cogs': [12.00, 12.00, 12.00, 20.00, 20.00, 20.00],
+        'logistics_cost': [2.00, 2.00, 2.00, 3.00, 3.00, 3.00],
+        'other_variable_costs': [1.00, 1.00, 1.00, 2.00, 2.00, 2.00],
+        'promo_cost_per_unit': [0.00, 0.00, 0.00, 5.00, 5.00, 5.00],
+        'week': [1, 2, 3, 1, 2, 3],
+        'baseline_volume': [100, 100, 100, 75, 75, 75],
+        'promo_volume': [150, 140, 120, 90, 85, 80],
+    }
+    return pd.DataFrame(data)
+
+
+def validate_historical_data(df: pd.DataFrame) -> Tuple[bool, list[str]]:
+    """
+    Validate historical promotion data in relational format.
+
+    Args:
+        df: DataFrame to validate
+
+    Returns:
+        Tuple of (is_valid, list of error messages)
+    """
+    errors = []
+
+    # Check required columns
+    missing_cols = [col for col in HISTORICAL_REQUIRED_COLUMNS if col not in df.columns]
+    if missing_cols:
+        errors.append(f"Missing required columns: {', '.join(missing_cols)}")
+        return False, errors
+
+    # Check numeric columns
+    numeric_cols = ['standard_price', 'promo_price', 'cogs', 'week', 'baseline_volume', 'promo_volume']
+    if 'logistics_cost' in df.columns:
+        numeric_cols.append('logistics_cost')
+    if 'other_variable_costs' in df.columns:
+        numeric_cols.append('other_variable_costs')
+
+    for col in numeric_cols:
+        if col in df.columns:
+            try:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                if df[col].isna().any():
+                    errors.append(f"Column '{col}' contains non-numeric values")
+            except Exception:
+                errors.append(f"Column '{col}' could not be converted to numeric")
+
+    # Check for negative values in costs
+    for col in ['standard_price', 'promo_price', 'cogs']:
+        if col in df.columns and (df[col] < 0).any():
+            errors.append(f"Column '{col}' contains negative values")
+
+    # Check promo price is less than standard price
+    if 'standard_price' in df.columns and 'promo_price' in df.columns:
+        invalid_promos = df['promo_price'] > df['standard_price']
+        if invalid_promos.any():
+            count = invalid_promos.sum()
+            errors.append(f"{count} row(s) have promo price greater than standard price")
+
+    # Check week is positive integer
+    if 'week' in df.columns and (df['week'] < 1).any():
+        errors.append("Week must be a positive integer")
+
+    # Check for empty DataFrame
+    if len(df) == 0:
+        errors.append("File contains no data rows")
+
+    return len(errors) == 0, errors
+
+
+def parse_historical_data(df: pd.DataFrame) -> list:
+    """
+    Parse relational DataFrame into list of HistoricalInputs.
+    Groups rows by product and transforms into weekly data structure.
+
+    Args:
+        df: Validated DataFrame with historical data
+
+    Returns:
+        List of HistoricalInputs (imported from calculations)
+    """
+    from calculations import HistoricalInputs, WeeklyData
+
+    results = []
+
+    # Group by product
+    for product_name, group in df.groupby('product_name'):
+        # Get product-level attributes from first row
+        first_row = group.iloc[0]
+
+        # Build weekly data from all rows for this product
+        weekly_data = []
+        for _, row in group.sort_values('week').iterrows():
+            weekly_data.append(WeeklyData(
+                week_number=int(row['week']),
+                baseline_units=float(row['baseline_volume']),
+                actual_units=float(row['promo_volume'])
+            ))
+
+        inputs = HistoricalInputs(
+            product_name=str(product_name),
+            standard_price=float(first_row['standard_price']),
+            promo_price=float(first_row['promo_price']),
+            cogs=float(first_row['cogs']),
+            logistics_cost=float(first_row.get('logistics_cost', 0)),
+            other_variable_costs=float(first_row.get('other_variable_costs', 0)),
+            promo_cost_per_unit=float(first_row.get('promo_cost_per_unit', 0)),
+            weekly_data=weekly_data
+        )
+        results.append(inputs)
+
+    return results
